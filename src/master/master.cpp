@@ -4622,7 +4622,7 @@ void Master::updateSlave(
   // NOTE: Need a copy of offers because the offers are removed inside the loop.
   foreach (Offer* offer, utils::copy(slave->offers)) {
     const Resources offered = offer->resources();
-    if (!offered.revocable().empty()) {
+    if (!offered.usageSlack().empty()) {
       LOG(INFO) << "Removing offer " << offer->id()
                 << " with revocable resources " << offered
                 << " on slave " << *slave;

@@ -701,7 +701,15 @@ message Resource {
 
   optional DiskInfo disk = 7;
 
-  message RevocableInfo {}
+  message RevocableInfo {
+    message ThrottleInfo {}
+
+    // If set, indicates that the resources may be throttled at
+    // any time. Throttle-able resoruces can be used for tasks
+    // that do not have strict performance requirements and are
+    // capable of handling being throttled.
+    optional ThrottleInfo throttle_info = 1;
+  }
 
   // If this is set, the resources are revocable, i.e., any tasks or
   // executors launched using these resources could get preempted or
@@ -1285,6 +1293,7 @@ message TaskStatus {
     REASON_MASTER_DISCONNECTED = 7;
     REASON_RECONCILIATION = 9;
     REASON_RESOURCES_UNKNOWN = 18;
+    REASON_RESOURCES_PREEMPTED = 25;
     REASON_SLAVE_DISCONNECTED = 10;
     REASON_SLAVE_REMOVED = 11;
     REASON_SLAVE_RESTARTED = 12;

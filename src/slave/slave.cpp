@@ -1432,6 +1432,34 @@ void Slave::runTask(
   const ExecutorInfo executorInfo = getExecutorInfo(frameworkInfo, task);
   const ExecutorID& executorId = executorInfo.executor_id();
 
+  Resources requested = executorInfo.resources() + task.resources();
+
+  Result<list<Executor*>> executors = getEvictableExecutors(requested);
+  if (executors.isError()) {
+    // This is a task requesting allocation slack resources.
+    LOG(WARNING) << "Not enough allocation slack revocable resources"
+                 << " for task " << task.task_id()
+                 << " of framework " << frameworkId;
+
+    const StatusUpdate update = protobuf::createStatusUpdate(
+        frameworkId,
+        info.id(),
+        task.task_id(),
+        TASK_LOST,
+        TaskStatus::SOURCE_SLAVE,
+        UUID::random(),
+        "Not enough allocation slack revocable resources for the task",
+        TaskStatus::REASON_RESOURCES_PREEMPTED);
+
+    statusUpdate(update, UPID());
+
+    if (framework->executors.empty() && framework->pending.empty()) {
+      removeFramework(framework);
+    }
+
+    return;
+  }
+
   if (HookManager::hooksAvailable()) {
     // Set task labels from run task label decorator.
     task.mutable_labels()->CopyFrom(HookManager::slaveRunTaskLabelDecorator(
@@ -1448,6 +1476,11 @@ void Slave::runTask(
   // level work and meta directories from getting gc'ed.
   Executor* executor = framework->getExecutor(executorId);
   if (executor == NULL) {
+    // Add `executorInfo` into pending list if it did not exist. The pending
+    // executor's resources will be used to calculate evictable executor list
+    // for MESOS-1607.
+    framework->pendingExecutors[executorId] = executorInfo;
+
     // Unschedule executor work directory.
     string path = paths::getExecutorPath(
         flags.work_dir, info.id(), frameworkId, executorId);
@@ -1464,9 +1497,50 @@ void Slave::runTask(
     }
   }
 
-  // Run the task after the unschedules are done.
-  unschedule.onAny(
-      defer(self(), &Self::_runTask, lambda::_1, frameworkInfo, task));
+  evictExecutors(executors, unschedule).onAny(
+      defer(self(), &Self::_runTask, unschedule, frameworkInfo, task));
+}
+
+
+Future<list<Future<bool>>> Slave::evictExecutors(
+    Result<list<Executor*>> executors,
+    Future<bool> unschedule)
+{
+  list<Future<bool>> futures;
+
+  futures.push_back(unschedule);
+
+  // If no executors to evict, only await unschedule GC future.
+  if (executors.isNone()) {
+    return await(futures);
+  }
+
+  foreach (Executor* executor, executors.get()) {
+    // If need to waiting for other evicting action, append it into the
+    // future list.
+    if (executor->state == Executor::TERMINATING) {
+      futures.push_back(executor->terminated.future());
+      continue;
+    }
+
+    if (executor->state == Executor::TERMINATED) {
+      continue;
+    }
+
+    killExecutor(
+        executor->frameworkId,
+        executor->id);
+
+    // Move Executor from evictable list to evicting list.
+    evictingExecutors[executor->frameworkId].insert(executor->id);
+    evictableExecutors[executor->frameworkId].erase(executor->id);
+
+    // The future of `shutdowExecutor`. The `executor->terminated` is set
+    // in `Framework::destroyExecutor`.
+    futures.push_back(executor->terminated.future());
+  }
+
+  return await(futures);
 }
 
 
@@ -1663,6 +1737,7 @@ void Slave::_runTask(
 
   if (executor == NULL) {
     executor = framework->launchExecutor(executorInfo, task);
+    addEvictableExecutor(executor, task);
   }
 
   CHECK_NOTNULL(executor);
@@ -3967,6 +4042,221 @@ void Slave::executorTerminated(
 }
 
 
+void Slave::addEvictableExecutor(Executor* executor, const TaskInfo& task)
+{
+  Resources executorResources = executor->info.resources();
+  Resources taskResources = task.resources();
+
+  if (!executorResources.allocationSlack().empty() ||
+      !taskResources.allocationSlack().empty()) {
+    evictableExecutors[executor->frameworkId].insert(executor->id);
+  }
+}
+
+
+void Slave::removeEvictableExecutor(Executor* executor)
+{
+  evictableExecutors[executor->frameworkId].erase(executor->id);
+  evictingExecutors[executor->frameworkId].erase(executor->id);
+}
+
+
+Resources Slave::getPendingAllocationSlack()
+{
+  Resources pending;
+
+  // Only account ALLOCATION_SLACK and stateless reserved resources.
+  foreachvalue (const Framework* framework, frameworks) {
+    // Account pending tasks resources.
+    typedef hashmap<TaskID, TaskInfo> TaskInfoMap;
+    foreachvalue (const TaskInfoMap taskMap, framework->pending) {
+      foreachvalue (const TaskInfo& task, taskMap) {
+        pending += task.resources();
+      }
+    }
+
+    // Account pending executors resources.
+    foreachvalue (const ExecutorInfo& executor, framework->pendingExecutors) {
+      pending += executor.resources();
+    }
+  }
+
+  return pending.allocationSlack() +
+      pending.allocationSlackable().flatten().flattenSlack();
+}
+
+
+Resources Slave::getTotalAllocationSlack()
+{
+  Try<Resources> total_ = applyCheckpointedResources(
+      info.resources(),
+      checkpointedResources);
+
+  CHECK_SOME(total_);
+
+  return total_.get().allocationSlackable().flatten().flattenSlack();
+}
+
+
+Resources Slave::getOccupiedAllocationSlack()
+{
+  Resources occupied;
+
+  foreachvalue (Framework* framework, frameworks) {
+    foreachvalue (Executor* executor, framework->executors) {
+      occupied += executor->resources;
+
+      // Includes queued tasks which will use resources.
+      foreach (const TaskInfo& task, executor->queuedTasks.values()) {
+        occupied += task.resources();
+      }
+    }
+  }
+
+  return occupied.allocationSlack() +
+      occupied.allocationSlackable().flatten().flattenSlack();
+}
+
+
+Resources Slave::getEvictingAllocationSlack()
+{
+  Resources evicting;
+
+  typedef set<ExecutorID> ExecutorIDSet;
+  foreachpair (
+      FrameworkID frameworkId,
+      ExecutorIDSet executorIdSet,
+      evictingExecutors) {
+    foreach (ExecutorID executorId, executorIdSet) {
+      Executor* executor = getExecutor(frameworkId, executorId);
+      evicting += executor->resources;
+      // Includes queued tasks which also release resources.
+      foreach (const TaskInfo& task, executor->queuedTasks.values()) {
+        evicting += task.resources();
+      }
+    }
+  }
+
+  return evicting.allocationSlack() +
+      evicting.allocationSlackable().flatten().flattenSlack();
+}
+
+
+// Get evictable executor ID list by `Resource::RevocableInfo::Type`.
+Result<list<Executor*>> Slave::getEvictableExecutors(
+    const Resources& requested)
+{
+  list<Executor*> executors;
+
+  // If not request stateless-reserved resources, return empty executors
+  // list to launch task directly.
+  if (requested.allocationSlackable().empty() &&
+      requested.allocationSlack().empty()) {
+    return executors;
+  }
+
+  Resources total           = getTotalAllocationSlack();
+  Resources pending         = getPendingAllocationSlack();
+  Resources occupied        = getOccupiedAllocationSlack();
+  Resources evicting        = getEvictingAllocationSlack();
+
+  // The availabe resources after evicting
+  Resources available       = total - pending - (occupied - evicting);
+
+  // The idle resources that can be used without evicting.
+  // The pending + occupied maybe more than total because of
+  // evicting executors.
+  Resources idle;
+
+  if (total.contains(pending + occupied)) {
+    idle = total - pending - occupied;
+  }
+
+  Resources allocationSlack = requested.allocationSlack();
+
+  if (!allocationSlack.empty()) {
+    LOG(INFO) << "Got idle resources <" << idle
+              << "> for <" << allocationSlack << ">";
+
+    // If idle allocation slack resources meet the request,
+    // return empty executor list to launch the task directly.
+    if (idle.contains(allocationSlack)) {
+      return executors;
+    }
+
+    return Error("Not enough resources.");
+  }
+
+  // The over-evicted resources can be used as ALLOCATION_SLACK or
+  // `reserved.stateless` resources.
+  Resources reserved = requested.allocationSlackable().flatten()
+      .flattenSlack();
+
+  LOG(INFO) << "Preempt evictable executors for " << reserved;
+
+  typedef set<ExecutorID> ExecutorIDSet;
+  foreachpair (
+      FrameworkID frameworkId,
+      ExecutorIDSet executorIdSet,
+      evictableExecutors) {
+    foreach (ExecutorID executorId, executorIdSet) {
+      if (idle.contains(reserved)) {
+        return executors;
+      }
+
+      if (available.contains(reserved)) {
+        return appendEvictingExecutors(executors, evictingExecutors);
+      }
+
+      Executor* executor = getExecutor(frameworkId, executorId);
+      // Only stateless.reserved & allocation slack resources can be re-used
+      // by request (reserved). Master makes sure that framework does not
+      // over use reserved resources; so Agent only evict enough resources
+      // (`allocation slack` and `stateless.reserved`) for it.
+      //
+      // NOTE: if the executor is evictable, all tasks will be killed.
+      Resources evict =
+          executor->resources.allocationSlackable().flatten().flattenSlack() +
+          executor->resources.allocationSlack();
+
+      available += evict;
+      idle += evict;
+
+      LOG(INFO) << "Got available resources <" << available << "> and idle <"
+                << idle << "> after evicting <" << evict << ">";
+
+      executors.push_back(executor);
+    }
+  }
+
+  // TODO(klaus1982): If did not get enough resources, evict all evictable
+  // executor to get resources back.
+  LOG(INFO) << "Did not get enough evictable executors for <"
+            << reserved << ">, waiting for all evicting executors";
+
+  return appendEvictingExecutors(executors, evictingExecutors);
+}
+
+
+list<Executor*> Slave::appendEvictingExecutors(
+    list<Executor*> executors_,
+    hashmap<FrameworkID, set<ExecutorID>> evictingExecutors)
+{
+  list<Executor*> executors = executors_;
+
+  typedef set<ExecutorID> ExecutorIDSet;
+  foreachpair (
+      FrameworkID frameworkId, ExecutorIDSet executorIds, evictingExecutors) {
+    foreach (ExecutorID executorId, executorIds) {
+      Executor* executor = getExecutor(frameworkId, executorId);
+      executors.push_back(executor);
+    }
+  }
+
+  return executors;
+}
+
+
 void Slave::removeExecutor(Framework* framework, Executor* executor)
 {
   CHECK_NOTNULL(framework);
@@ -4053,6 +4343,7 @@ void Slave::removeExecutor(Framework* framework, Executor* executor)
   }
 
   framework->destroyExecutor(executor->id);
+  removeEvictableExecutor(executor);
 }
 
 
@@ -4784,6 +5075,82 @@ void Slave::qosCorrections()
 }
 
 
+void Slave::killExecutor(
+    const FrameworkID& frameworkId,
+    const ExecutorID& executorId)
+{
+  // Verify slave state.
+  CHECK(state == RECOVERING || state == DISCONNECTED ||
+        state == RUNNING || state == TERMINATING)
+    << state;
+
+  if (state == RECOVERING || state == TERMINATING) {
+    LOG(WARNING) << "Cannot perform killing executor because the slave is "
+                 << state;
+    return;
+  }
+
+  Framework* framework = getFramework(frameworkId);
+  if (framework == NULL) {
+    LOG(WARNING) << "Ignoring KILL on framework "
+                 << frameworkId << ": framework cannot be found";
+    return;
+  }
+
+  // Verify framework state.
+  CHECK(framework->state == Framework::RUNNING ||
+      framework->state == Framework::TERMINATING)
+    << framework->state;
+
+  if (framework->state == Framework::TERMINATING) {
+    LOG(WARNING) << "Ignoring KILL on framework "
+                 << frameworkId << ": framework is terminating.";
+    return;
+  }
+
+  Executor* executor = framework->getExecutor(executorId);
+  if (executor == NULL) {
+    LOG(WARNING) << "Ignoring KILL on executor '"
+                 << executorId << "' of framework " << frameworkId
+                 << ": executor cannot be found";
+    return;
+  }
+
+  const ContainerID containerId = executor->containerId;
+
+  switch (executor->state) {
+    case Executor::REGISTERING:
+    case Executor::RUNNING: {
+      LOG(INFO) << "Killing container '" << containerId
+                << "' for executor " << *executor
+                << " as evicting";
+
+      containerizer->destroy(containerId);
+      executor->state = Executor::TERMINATING;
+      containerizer::Termination termination;
+      termination.set_state(TASK_LOST);
+      termination.add_reasons(TaskStatus::REASON_RESOURCES_PREEMPTED);
+      termination.set_message("Container preempted by reserved resources");
+
+      executor->pendingTermination = termination;
+
+      ++metrics.executors_preempted;
+      break;
+    }
+    case Executor::TERMINATING:
+    case Executor::TERMINATED:
+      LOG(WARNING) << "Ignoring KILL on executor "
+                   << *executor << " because the executor is in "
+                   << executor->state << " state";
+      break;
+    default:
+      LOG(FATAL) << "Executor " << *executor << " is in unexpected state "
+                 << executor->state;
+      break;
+  }
+}
+
+
 void Slave::_qosCorrections(const Future<list<QoSCorrection>>& future)
 {
   // Make sure correction handler is scheduled again.
@@ -5349,6 +5716,10 @@ Executor* Framework::launchExecutor(
 
   executors[executorInfo.executor_id()] = executor;
 
+  // Remove the exeuctor from pending list; `Slave::getEvictableExecutors`
+  // accounts executor resources from `executors[executor_id]`.
+  pendingExecutors.erase(executorInfo.executor_id());
+
   LOG(INFO) << "Launching executor " << executorInfo.executor_id()
             << " of framework " << id()
             << " with resources " << executorInfo.resources()
@@ -5426,6 +5797,9 @@ void Framework::destroyExecutor(const ExecutorID& executorId)
   if (executors.contains(executorId)) {
     Executor* executor = executors[executorId];
     executors.erase(executorId);
+
+    // Notify await processes that the executor is done.
+    executor->terminated.set(true);
 
     // Pass ownership of the executor pointer.
     completedExecutors.push_back(Owned<Executor>(executor));

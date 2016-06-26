@@ -97,8 +97,8 @@ public:
       list<QoSCorrection> corrections;
 
       for (const ResourceUsage::Executor& executor : usage.executors()) {
-        // Set kill correction for all revocable executors.
-        if (!Resources(executor.allocated()).revocable().empty()) {
+         // Set kill correction for all usage slack revocable executors.
+         if (!Resources(executor.allocated()).usageSlack().empty()) {
           QoSCorrection correction;
 
           correction.set_type(mesos::slave::QoSCorrection_Type_KILL);

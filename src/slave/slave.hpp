@@ -331,6 +331,10 @@ public:
       const FrameworkID& frameworkId,
       const ExecutorID& executorId);
 
+  void killExecutor(
+      const FrameworkID& frameworkId,
+      const ExecutorID& executorId);
+
   // Returns an ExecutorInfo for a TaskInfo (possibly
   // constructing one if the task has a CommandInfo).
   ExecutorInfo getExecutorInfo(
@@ -377,6 +381,28 @@ public:
   // Removes and garbage collects the executor.
   void removeExecutor(Framework* framework, Executor* executor);
 
+  // If the executor used ALLOCATION_SLACK resources, add it into
+  // `evictableExecutors` list.
+  void addEvictableExecutor(Executor* executor, const TaskInfo& task);
+
+  // If the executor used ALLOCATION_SLACK resources, remove it from
+  // `evictableExecutors` list.
+  void removeEvictableExecutor(Executor* executor);
+
+  // Get evictable executor ID list by `request resources`. The return
+  // value is `Result<list<Executor*>>`:
+  //  - isError(): there's not enough resources to launch tasks.
+  //  - isSome(): the list of executors that need to be evicted for
+  //              resources. If no evictable exectuors need to be
+  //              terminated, the list is empty.
+  Result<std::list<Executor*>> getEvictableExecutors(
+      const Resources& request);
+
+  // Evict executors to get ALLOCATION_SALCK resources back for owner.
+  Future<std::list<Future<bool>>> evictExecutors(
+      Result<std::list<Executor*>> executors,
+      Future<bool> unschedule);
+
   // Removes and garbage collects the framework.
   // Made 'virtual' for Slave mocking.
   virtual void removeFramework(Framework* framework);
@@ -397,6 +423,24 @@ public:
 
   // Returns the resource usage information for all executors.
   process::Future<ResourceUsage> usage();
+
+  // Returns the total resources which can be used as allocation slack.
+  // It includes `stateless.reserved` resources in MESOS-1607.
+  Resources getTotalAllocationSlack();
+
+  // Returns the `ALLOCATION_SLACK` and `stateless.reserved` resources used
+  // by pending tasks and pending executors.
+  Resources getPendingAllocationSlack();
+
+  // Returns the `ALLOCATION_SLACK` and `stateless.reserved` resources used
+  // by running tasks and running executors; including evicting tasks and
+  // executors. The evicting tasks and evicting executors were removed when
+  // executors terminated.
+  Resources getOccupiedAllocationSlack();
+
+  // Returns the `ALLOCATION_SLACK` and `stateless.reserved` resources used
+  // by evicting tasks and evicting executors.
+  Resources getEvictingAllocationSlack();
 
 private:
   void _authenticate();
@@ -492,6 +536,11 @@ private:
       const FrameworkID& frameworkId,
       const Executor* executor);
 
+  std::list<Executor*> appendEvictingExecutors(
+      std::list<Executor*> executors_,
+      hashmap<FrameworkID, std::set<ExecutorID>> evictingExecutors);
+
+
   // Forwards the current total of oversubscribed resources.
   void forwardOversubscribed();
   void _forwardOversubscribed(
@@ -581,6 +630,14 @@ private:
   // The most recent estimate of the total amount of oversubscribed
   // (allocated and oversubscribable) resources.
   Option<Resources> oversubscribedResources;
+
+  // The map of evictable executor list. If there are not enough resources,
+  // the evictable executor will be terminated by slave to release resources.
+  hashmap<FrameworkID, std::set<ExecutorID>> evictableExecutors;
+
+  // The map of evicting executor list. The executors were moved from
+  // `evictableExecutors` to `evictingExecutors` when evicting executors.
+  hashmap<FrameworkID, std::set<ExecutorID>> evictingExecutors;
 };
 
 
@@ -743,6 +800,8 @@ struct Executor
   // non-terminal tasks.
   Option<containerizer::Termination> pendingTermination;
 
+  Promise<bool> terminated;
+
 private:
   Executor(const Executor&);              // No copying.
   Executor& operator=(const Executor&); // No assigning.
@@ -797,6 +856,7 @@ struct Framework
 
   // Current running executors.
   hashmap<ExecutorID, Executor*> executors;
+  hashmap<ExecutorID, ExecutorInfo> pendingExecutors;
 
   // Up to MAX_COMPLETED_EXECUTORS_PER_FRAMEWORK completed executors.
   boost::circular_buffer<process::Owned<Executor>> completedExecutors;

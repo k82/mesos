@@ -163,6 +163,15 @@ public:
   // Tests if the given Resource object is revocable.
   static bool isRevocable(const Resource& resource);
 
+  // Tests if the given Resource object is allocation slack, resources
+  // that are reserved but not allocated.
+  // API to filter allocation slack resources.
+  static bool isAllocationSlack(const Resource& resource);
+
+  // Tests if the given Resource object is usage slack, revocable
+  // resources that are allocated but under-utilized.
+  static bool isUsageSlack(const Resource& resource);
+
   // Returns the summed up Resources given a hashmap<Key, Resources>.
   //
   // NOTE: While scalar resources such as "cpus" sum correctly,
@@ -221,12 +230,9 @@ public:
   Resources filter(
       const lambda::function<bool(const Resource&)>& predicate) const;
 
-  // Returns the reserved resources, by role.
-  hashmap<std::string, Resources> reserved() const;
-
   // Returns the reserved resources for the role. Note that the "*"
   // role represents unreserved resources, and will be ignored.
-  Resources reserved(const std::string& role) const;
+  Resources reserved(const Option<std::string>& role = None()) const;
 
   // Returns the unreserved resources.
   Resources unreserved() const;
@@ -239,6 +245,21 @@ public:
 
   // Returns the non-revocable resources, effectively !revocable().
   Resources nonRevocable() const;
+
+  // Returns the allocation slack, resources that are reserved but not
+  // allocated.
+  Resources allocationSlack() const;
+
+  // Returns the usage slack revocable, revocable resources that are
+  // allocated but under-utilized.
+  Resources usageSlack() const;
+
+  Resources nonUsageSlack() const;
+
+  // Returns the resources can be `ALLOCATION_SLACK`.
+  Resources allocationSlackable() const;
+
+  Resources flattenSlack() const;
 
   // Returns a Resources object with the same amount of each resource
   // type as these Resources, but with all Resource objects marked as

@@ -245,6 +245,12 @@ protected:
       const FrameworkID& frameworkID,
       const SlaveID& slaveID);
 
+  // Updates the allocation slack when dynamic reservation was called.
+  void updateAllocationSlack(
+      const Resources& originalTotal,
+      const SlaveID& slaveId,
+      const std::vector<Offer::Operation>& operations);
+
   bool allocatable(const Resources& resources);
 
   bool initialized;

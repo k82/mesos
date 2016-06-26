@@ -207,6 +207,12 @@ bool operator==(const Resource& left, const Resource& right)
     return false;
   }
 
+  if (left.has_revocable()
+      && left.revocable().has_throttle_info() !=
+         right.revocable().has_throttle_info()) {
+      return false;
+  }
+
   if (left.type() == Value::SCALAR) {
     return left.scalar() == right.scalar();
   } else if (left.type() == Value::RANGES) {
@@ -275,6 +281,12 @@ static bool addable(const Resource& left, const Resource& right)
     return false;
   }
 
+  if (left.has_revocable() &&
+      left.revocable().has_throttle_info() !=
+      right.revocable().has_throttle_info()) {
+      return false;
+  }
+
   return true;
 }
 
@@ -329,6 +341,12 @@ static bool subtractable(const Resource& left, const Resource& right)
   // Check RevocableInfo.
   if (left.has_revocable() != right.has_revocable()) {
     return false;
+  }
+
+  if (left.has_revocable()
+      && left.revocable().has_throttle_info() !=
+         right.revocable().has_throttle_info()) {
+      return false;
   }
 
   return true;
@@ -789,6 +807,26 @@ bool Resources::isRevocable(const Resource& resource)
 }
 
 
+bool Resources::isAllocationSlack(const Resource& resource)
+{
+  if (!resource.has_revocable()) {
+    return false;
+  }
+
+  return !resource.revocable().has_throttle_info();
+}
+
+
+bool Resources::isUsageSlack(const Resource& resource)
+{
+  if (!resource.has_revocable()) {
+    return false;
+  }
+
+  return resource.revocable().has_throttle_info();
+}
+
+
 /////////////////////////////////////////////////
 // Public member functions.
 /////////////////////////////////////////////////
@@ -859,21 +897,7 @@ Resources Resources::filter(
 }
 
 
-hashmap<string, Resources> Resources::reserved() const
-{
-  hashmap<string, Resources> result;
-
-  foreach (const Resource& resource, resources) {
-    if (isReserved(resource)) {
-      result[resource.role()] += resource;
-    }
-  }
-
-  return result;
-}
-
-
-Resources Resources::reserved(const string& role) const
+Resources Resources::reserved(const Option<string>& role) const
 {
   return filter(lambda::bind(isReserved, lambda::_1, role));
 }
@@ -904,6 +928,25 @@ Resources Resources::nonRevocable() const
 }
 
 
+Resources Resources::allocationSlack() const
+{
+  return filter(isAllocationSlack);
+}
+
+
+Resources Resources::usageSlack() const
+{
+  return filter(isUsageSlack);
+}
+
+
+Resources Resources::nonUsageSlack() const
+{
+  return filter(
+      [](const Resource& resource) { return !isUsageSlack(resource); });
+}
+
+
 Resources Resources::flatten(
     const string& role,
     const Option<Resource::ReservationInfo>& reservation) const
@@ -921,6 +964,12 @@ Resources Resources::flatten(
   }
 
   return flattened;
+}
+
+
+Resources Resources::allocationSlackable() const
+{
+  return reserved();
 }
 
 
@@ -1335,6 +1384,22 @@ Resources::operator const RepeatedPtrField<Resource>&() const
   return resources;
 }
 
+bool operator==(
+    const Resource::RevocableInfo& left,
+    const Resource::RevocableInfo& right)
+{
+  return left.has_throttle_info() == right.has_throttle_info();
+}
+
+
+bool operator!=(
+    const Resource::RevocableInfo& left,
+    const Resource::RevocableInfo& right)
+{
+  return !(left == right);
+}
+
+
 
 bool Resources::operator==(const Resources& that) const
 {
@@ -1514,6 +1579,20 @@ ostream& operator<<(ostream& stream, const Labels& labels)
 }
 
 
+ostream& operator<<(ostream& stream, const Resource::RevocableInfo& revocable)
+{
+  stream << "{REV";
+
+  if (revocable.has_throttle_info()) {
+    stream << "(Throttleable)";
+  }
+
+  stream << "}";
+
+  return stream;
+}
+
+
 ostream& operator<<(ostream& stream, const Resource& resource)
 {
   stream << resource.name();
@@ -1538,10 +1617,8 @@ ostream& operator<<(ostream& stream, const Resource& resource)
     stream << "[" << resource.disk() << "]";
   }
 
-  // Once extended revocable attributes are available, change this to a more
-  // meaningful value.
   if (resource.has_revocable()) {
-    stream << "{REV}";
+    stream << resource.revocable();
   }
 
   stream << ":";

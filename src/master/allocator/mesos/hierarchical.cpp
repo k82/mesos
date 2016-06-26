@@ -441,6 +441,17 @@ void HierarchicalAllocatorProcess::addSlave(
 
   slaves[slaveId] = Slave();
   slaves[slaveId].total = total;
+  // Initialize the allocation slack for an agent. The total allocation
+  // slack for an agent is the whole stateless reservation resources
+  // on one agent.
+  Resources totalAllocationSlack = slaves[slaveId].total.reserved()
+    .flatten(RevocableInfo());
+
+  slaves[slaveId].total += totalAllocationSlack;
+
+  // roleSorter needs to count in allocation slack resoures.
+  roleSorter->add(slaveId, totalAllocationSlack);
+
   slaves[slaveId].allocated = Resources::sum(used);
   slaves[slaveId].activated = true;
   slaves[slaveId].hostname = slaveInfo.hostname();
@@ -520,7 +531,8 @@ void HierarchicalAllocatorProcess::updateSlave(
 
   // Remove the old oversubscribed resources from the total and then
   // add the new estimate of oversubscribed resources.
-  slaves[slaveId].total = slaves[slaveId].total.nonRevocable() + oversubscribed;
+  Resources total = slaves[slaveId].total;
+  slaves[slaveId].total = total.nonUsageSlack() + oversubscribed;
 
   // Now, update the total resources in the role sorters.
   roleSorter->update(slaveId, slaves[slaveId].total);
@@ -590,6 +602,77 @@ void HierarchicalAllocatorProcess::requestResources(
 }
 
 
+void HierarchicalAllocatorProcess::updateAllocationSlack(
+      const Resources& originalTotal,
+      const SlaveID& slaveId,
+      const std::vector<Offer::Operation>& operations)
+{
+  Resources newStatelessReserved = slaves[slaveId].total.reserved();
+  // Update the total allocation slack resources for the agent if reserve
+  // some new stateless reserved resources.
+  // If unreserve some stateless reserved resources, it can be classified
+  // to two cases:
+  //     * If there are enough free allocation slack resources for unreserve,
+  //       shrink the total allocation slack directly.
+  //     * If there are not enough free allocation slack, only decrease the
+  //       total allocation slack by `freeAallocationSlack`. The agent may
+  //       be overcommitted for a while, once the task/executor running with
+  //       allocation slack finsihed, those resources will be recovered back
+  //       to allocator and allocator will update agent total allocation slack
+  //       again in `recoverResources`.
+  if (newStatelessReserved.contains(originalTotal.reserved())) {
+    slaves[slaveId].total -= slaves[slaveId].total.allocationSlack();
+    slaves[slaveId].total += newStatelessReserved.flatten(RevocableInfo());
+    VLOG(2) << "Updated slave " << slaveId
+            << " resources from " << originalTotal
+            << " to " << slaves[slaveId].total;
+  } else {
+    // Handle unreserve operations.
+    Resources freeAllocationSlack = originalTotal.allocationSlack() -
+        slaves[slaveId].allocated.allocationSlack();
+    foreach (const Offer::Operation& operation, operations) {
+      if (operation.type() != Offer::Operation::UNRESERVE) {
+        continue;
+      }
+
+      if (freeAllocationSlack.empty()) {
+        break;
+      }
+
+      Resources unreserved = operation.unreserve().resources();
+      VLOG(2) << "Trying to unreserve resources " << unreserved
+              << " on agent " << slaveId;
+
+      foreach (const string& name, unreserved.names()) {
+        Resources unreservedResources = unreserved.get(name).flatten()
+            .flattenSlack(Resource::RevocableInfo::ALLOCATION_SLACK);
+        VLOG(2) << "Unreserved resources " << unreservedResources
+                << " free allocation slack resources "
+                << freeAllocationSlack;
+        if (freeAllocationSlack.contains(unreservedResources)) {
+          // Enough free allocation slack resources to shrink dynamic
+          // reservation resources.
+          slaves[slaveId].total -= unreservedResources;
+          freeAllocationSlack -= unreservedResources;
+          VLOG(2) << "Total resources after decrease " << name
+                  << " is " << slaves[slaveId].total;
+        } else {
+          // Not enough free allocation slack to shrink dynamic
+          // reservation resources..
+          slaves[slaveId].total -= freeAllocationSlack.get(name);
+          freeAllocationSlack -= freeAllocationSlack.get(name);
+          VLOG(2) << "Total resources after decrease " << name
+                  << " is " << slaves[slaveId].total;
+        }
+      }
+    }
+  }
+
+  // Now, update the total resources in the role sorters.
+  roleSorter->update(slaveId, slaves[slaveId].total);
+}
+
+
 void HierarchicalAllocatorProcess::updateAllocation(
     const FrameworkID& frameworkId,
     const SlaveID& slaveId,
@@ -644,11 +727,15 @@ void HierarchicalAllocatorProcess::updateAllocation(
 
   slaves[slaveId].allocated = updatedSlaveAllocation.get();
 
+  Resources total = slaves[slaveId].total;
+
   // Update the total resources.
-  Try<Resources> updatedTotal = slaves[slaveId].total.apply(operations);
+  Try<Resources> updatedTotal = total.apply(operations);
   CHECK_SOME(updatedTotal);
 
   slaves[slaveId].total = updatedTotal.get();
+
+  updateAllocationSlack(total, slaveId, operations);
 
   LOG(INFO) << "Updated allocation of framework " << frameworkId
             << " on slave " << slaveId
@@ -683,11 +770,15 @@ Future<Nothing> HierarchicalAllocatorProcess::updateAvailable(
     return Failure(updatedAvailable.error());
   }
 
+  Resources total = slaves[slaveId].total;
+
   // Update the total resources.
-  Try<Resources> updatedTotal = slaves[slaveId].total.apply(operations);
+  Try<Resources> updatedTotal = total.apply(operations);
   CHECK_SOME(updatedTotal);
 
   slaves[slaveId].total = updatedTotal.get();
+
+  updateAllocationSlack(total, slaveId, operations);
 
   // Now, update the total resources in the role sorters.
   roleSorter->update(slaveId, slaves[slaveId].total);
@@ -886,6 +977,35 @@ void HierarchicalAllocatorProcess::recoverResources(
     CHECK(slaves[slaveId].allocated.contains(resources));
 
     slaves[slaveId].allocated -= resources;
+
+    Resources total = slaves[slaveId].total;
+    Resources totalAllocationSlack = total.allocationSlack();
+    Resources actualAllocationSlack = total.stateless().reserved()
+        .flatten().flattenSlack(Resource::RevocableInfo::ALLOCATION_SLACK);
+
+    // Check if dynamic reservation shrinked. If dynamic reservation
+    // shrinked because of un-reserve resources, then when recover resource
+    // back, the allocator need to update the totalAllocationSlack for the
+    // agent. Refer to `updateAvailable` and `updateAllocation` for detail.
+    if (totalAllocationSlack.contains(actualAllocationSlack)
+        && totalAllocationSlack != actualAllocationSlack) {
+      foreach (const string& name, resources.names()) {
+        Resources totalASResource = total.allocationSlack().get(name);
+        Resources recoveredASResource = resources.get(name).allocationSlack();
+        Resources actualASResource = actualAllocationSlack.get(name);
+
+        VLOG(2) << "Recovered res name " << name
+                << " total allocation slack resources " << totalASResource
+                << " recoveredAllocSlack resources " << recoveredASResource
+                << " actualAllocSlackRes " << actualASResource;
+        if ((totalASResource - recoveredASResource)
+            .contains(actualASResource)) {
+          slaves[slaveId].total -= recoveredASResource;
+        } else {
+          slaves[slaveId].total -= (totalASResource - actualASResource);
+        }
+      }
+    }
 
     VLOG(1) << "Recovered " << resources
             << " (total: " << slaves[slaveId].total
@@ -1396,10 +1516,36 @@ void HierarchicalAllocatorProcess::allocate(
           resources += available.unreserved();
         }
 
+        // Available allocation slack resources on the agent.
+        Resources remainingAllocationSlack;
+
         // Remove revocable resources if the framework has not opted
         // for them.
         if (!frameworks[frameworkId].revocable) {
           resources = resources.nonRevocable();
+        } else {
+          // Calculate the `remainingAllocationSlack` if the framework can
+          // use revocable resources and reservation oversubscription also
+          // enabled. The `remainingAllocationSlack` need to exclude the
+          // stateless reserved resources allocated in previous allocation
+          // cycle.
+          remainingAllocationSlack = resources.allocationSlack();
+
+          Resources usedStatelessReserved = slaves[slaveId].allocated
+              .stateless().reserved().flatten()
+              .flattenSlack(Resource::RevocableInfo::ALLOCATION_SLACK);
+
+          // Decrease the allocation slack if some stateless reserved
+          // resources are allocated.
+          remainingAllocationSlack -= usedStatelessReserved;
+          resources -= usedStatelessReserved;
+
+          VLOG(2) << "Available resources " << resources
+                  << " used stateless reserved " << usedStatelessReserved
+                  << " remaining allocation slack "
+                  << remainingAllocationSlack
+                  << " for role " << role
+                  << " on slave " << slaveId;
         }
 
         // If the resources are not allocatable, ignore.
@@ -1421,7 +1567,14 @@ void HierarchicalAllocatorProcess::allocate(
 
         if (!remainingClusterResources.contains(
                 allocatedStage2 + scalarQuantity)) {
-          continue;
+          // Quota does not affect revocable resources. If the non-revocable
+          // component of this offer would exceed quota, the revocable portion
+          // can still be offered.
+          if (remainingAllocationSlack.empty()) {
+            continue;
+          } else {
+            resources = remainingAllocationSlack;
+          }
         }
 
         VLOG(2) << "Allocating " << resources << " on slave " << slaveId
@@ -1679,8 +1832,33 @@ bool HierarchicalAllocatorProcess::allocatable(
   Option<double> cpus = resources.cpus();
   Option<Bytes> mem = resources.mem();
 
-  return (cpus.isSome() && cpus.get() >= MIN_CPUS) ||
-         (mem.isSome() && mem.get() >= MIN_MEM);
+  Option<double> nonRevocableCpus = resources.nonRevocable().cpus();
+  Option<Bytes> nonRevocableMem = resources.nonRevocable().mem();
+
+  bool nonRevocableCpuReady = nonRevocableCpus.isSome() &&
+      nonRevocableCpus.get() >= MIN_CPUS;
+  bool nonRevocableMemReady = nonRevocableMem.isSome() &&
+      nonRevocableMem.get() >= MIN_MEM;
+
+  Option<double> usageSlackCpus = resources.usageSlack().cpus();
+  Option<Bytes> usageSlackMem = resources.usageSlack().mem();
+
+  bool usageSlackCpuReady = usageSlackCpus.isSome() &&
+      usageSlackCpus.get() >= MIN_CPUS;
+  bool usageSlackMemReady = usageSlackMem.isSome() &&
+      usageSlackMem.get() >= MIN_MEM;
+
+  Option<double> allocationSlackCpus = resources.allocationSlack().cpus();
+  Option<Bytes> allocationSlackMem = resources.allocationSlack().mem();
+
+  bool allocationSlackCpuReady = allocationSlackCpus.isSome() &&
+      allocationSlackCpus.get() >= MIN_CPUS;
+  bool allocationSlackMemReady = allocationSlackMem.isSome() &&
+      allocationSlackMem.get() >= MIN_MEM;
+
+  return nonRevocableCpuReady || nonRevocableMemReady ||
+         usageSlackCpuReady || usageSlackMemReady ||
+         allocationSlackCpuReady || allocationSlackMemReady;
 }
 
 } // namespace internal {

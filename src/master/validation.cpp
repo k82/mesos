@@ -465,9 +465,10 @@ Option<Error> validateResources(const TaskInfo& task)
   foreach (const string& name, total.names()) {
     Resources resources = total.get(name);
     if (!resources.revocable().empty() &&
-        resources != resources.revocable()) {
-      return Error("Task (and its executor, if exists) uses both revocable and"
-                   " non-revocable " + name);
+        resources != resources.usageSlack() &&
+        resources != resources.allocationSlack()) {
+      return Error("Task (and its executor, if exists) uses mixed"
+                   " resources as " + stringify(resources));
     }
   }
 
