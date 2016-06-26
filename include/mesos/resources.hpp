@@ -272,6 +272,8 @@ public:
       const std::string& role = "*",
       const Option<Resource::ReservationInfo>& reservation = None()) const;
 
+  Resources flatten(const Resource::RevocableInfo& revocable) const;
+
   // Returns a Resources object that contains all the scalar resources
   // in this object, but with their ReservationInfo and DiskInfo
   // omitted. Note that the `role` and RevocableInfo, if any, are

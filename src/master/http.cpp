@@ -1075,20 +1075,13 @@ Future<Response> Master::Http::slaves(const Request& request) const
           // information is necessary so that operators can use the
           // `/unreserve` and `/destroy-volumes` endpoints.
 
-          hashmap<string, Resources> reserved =
-            slave->totalResources.reserved();
+          Resources reserved = slave->totalResources.reserved();
 
           writer->field(
               "reserved_resources_full",
-              [&reserved](JSON::ObjectWriter* writer) {
-                foreachpair (const string& role,
-                             const Resources& resources,
-                             reserved) {
-                  writer->field(role, [&resources](JSON::ArrayWriter* writer) {
-                    foreach (const Resource& resource, resources) {
-                      writer->element(JSON::Protobuf(resource));
-                    }
-                  });
+              [&reserved](JSON::ArrayWriter* writer) {
+                foreach (const Resource& resource, reserved) {
+                  writer->element(JSON::Protobuf(resource));
                 }
               });
 

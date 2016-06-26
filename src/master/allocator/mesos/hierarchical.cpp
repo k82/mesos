@@ -445,7 +445,7 @@ void HierarchicalAllocatorProcess::addSlave(
   // slack for an agent is the whole stateless reservation resources
   // on one agent.
   Resources totalAllocationSlack = slaves[slaveId].total.reserved()
-    .flatten(RevocableInfo());
+    .flatten(Resource::RevocableInfo());
 
   slaves[slaveId].total += totalAllocationSlack;
 
@@ -622,7 +622,8 @@ void HierarchicalAllocatorProcess::updateAllocationSlack(
   //       again in `recoverResources`.
   if (newStatelessReserved.contains(originalTotal.reserved())) {
     slaves[slaveId].total -= slaves[slaveId].total.allocationSlack();
-    slaves[slaveId].total += newStatelessReserved.flatten(RevocableInfo());
+    slaves[slaveId].total += newStatelessReserved
+        .flatten(Resource::RevocableInfo());
     VLOG(2) << "Updated slave " << slaveId
             << " resources from " << originalTotal
             << " to " << slaves[slaveId].total;
@@ -644,8 +645,8 @@ void HierarchicalAllocatorProcess::updateAllocationSlack(
               << " on agent " << slaveId;
 
       foreach (const string& name, unreserved.names()) {
-        Resources unreservedResources = unreserved.get(name).flatten()
-            .flattenSlack(Resource::RevocableInfo::ALLOCATION_SLACK);
+        Resources unreservedResources = unreserved.get(name)
+            .flatten(Resource::RevocableInfo());
         VLOG(2) << "Unreserved resources " << unreservedResources
                 << " free allocation slack resources "
                 << freeAllocationSlack;
@@ -980,8 +981,8 @@ void HierarchicalAllocatorProcess::recoverResources(
 
     Resources total = slaves[slaveId].total;
     Resources totalAllocationSlack = total.allocationSlack();
-    Resources actualAllocationSlack = total.stateless().reserved()
-        .flatten().flattenSlack(Resource::RevocableInfo::ALLOCATION_SLACK);
+    Resources actualAllocationSlack = total.reserved()
+        .flatten(Resource::RevocableInfo());
 
     // Check if dynamic reservation shrinked. If dynamic reservation
     // shrinked because of un-reserve resources, then when recover resource
@@ -1532,8 +1533,7 @@ void HierarchicalAllocatorProcess::allocate(
           remainingAllocationSlack = resources.allocationSlack();
 
           Resources usedStatelessReserved = slaves[slaveId].allocated
-              .stateless().reserved().flatten()
-              .flattenSlack(Resource::RevocableInfo::ALLOCATION_SLACK);
+              .reserved().flatten(Resource::RevocableInfo());
 
           // Decrease the allocation slack if some stateless reserved
           // resources are allocated.

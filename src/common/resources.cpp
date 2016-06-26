@@ -967,6 +967,19 @@ Resources Resources::flatten(
 }
 
 
+Resources Resources::flatten(const Resource::RevocableInfo& revocable) const
+{
+  Resources flattened;
+
+  foreach (Resource resource, resources) {
+    resource.mutable_revocable()->CopyFrom(revocable);
+    flattened += resource;
+  }
+
+  return flattened;
+}
+
+
 Resources Resources::allocationSlackable() const
 {
   return reserved();
