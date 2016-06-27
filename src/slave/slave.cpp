@@ -4082,7 +4082,7 @@ Resources Slave::getPendingAllocationSlack()
   }
 
   return pending.allocationSlack() +
-      pending.allocationSlackable().flatten().flattenSlack();
+      pending.allocationSlackable().flatten(Resource::RevocableInfo());
 }
 
 
@@ -4094,7 +4094,7 @@ Resources Slave::getTotalAllocationSlack()
 
   CHECK_SOME(total_);
 
-  return total_.get().allocationSlackable().flatten().flattenSlack();
+  return total_.get().allocationSlackable().flatten(Resource::RevocableInfo());
 }
 
 
@@ -4114,7 +4114,7 @@ Resources Slave::getOccupiedAllocationSlack()
   }
 
   return occupied.allocationSlack() +
-      occupied.allocationSlackable().flatten().flattenSlack();
+      occupied.allocationSlackable().flatten(Resource::RevocableInfo());
 }
 
 
@@ -4138,7 +4138,7 @@ Resources Slave::getEvictingAllocationSlack()
   }
 
   return evicting.allocationSlack() +
-      evicting.allocationSlackable().flatten().flattenSlack();
+      evicting.allocationSlackable().flatten(Resource::RevocableInfo());
 }
 
 
@@ -4189,8 +4189,8 @@ Result<list<Executor*>> Slave::getEvictableExecutors(
 
   // The over-evicted resources can be used as ALLOCATION_SLACK or
   // `reserved.stateless` resources.
-  Resources reserved = requested.allocationSlackable().flatten()
-      .flattenSlack();
+  Resources reserved = requested.allocationSlackable()
+      .flatten(Resource::RevocableInfo());
 
   LOG(INFO) << "Preempt evictable executors for " << reserved;
 
@@ -4216,7 +4216,8 @@ Result<list<Executor*>> Slave::getEvictableExecutors(
       //
       // NOTE: if the executor is evictable, all tasks will be killed.
       Resources evict =
-          executor->resources.allocationSlackable().flatten().flattenSlack() +
+          executor->resources.allocationSlackable()
+              .flatten(Resource::RevocableInfo()) +
           executor->resources.allocationSlack();
 
       available += evict;

@@ -36,8 +36,6 @@
 #include "common/parse.hpp"
 #include "common/protobuf_utils.hpp"
 
-#include "hdfs/hdfs.hpp"
-
 using namespace mesos;
 using namespace mesos::internal;
 
@@ -61,83 +59,31 @@ public:
         "master",
         "Mesos master (e.g., IP1:PORT1)");
 
-    add(&name,
-        "name",
-        "Name for the command");
-
-    add(&shell,
-        "shell",
-        "Determine the command is a shell or not. If not, 'command' will be\n"
-        "treated as executable value and arguments (TODO).",
-        true);
-
     add(&command,
         "command",
         "Shell command to launch");
-
-    add(&environment,
-        "env",
-        "Shell command environment variables.\n"
-        "The value could be a JSON formatted string of environment variables"
-        "(ie: {\"name1\": \"value1\"} )\n"
-        "or a file path containing the JSON formatted environment variables.\n"
-        "Path could be of the form 'file:///path/to/file' "
-        "or '/path/to/file'.\n");
 
     add(&resources,
         "resources",
         "Resources for the command",
         "cpus:1;mem:128");
 
-    add(&hadoop,
-        "hadoop",
-        "Path to `hadoop' script (used for copying packages)",
-        "hadoop");
+    add(&name,
+        "name",
+        "The name of framework",
+        "test");
 
-    add(&hdfs,
-        "hdfs",
-        "The ip:port of the NameNode service",
-        "localhost:9000");
-
-    add(&package,
-        "package",
-        "Package to upload into HDFS and copy into command's\n"
-        "working directory (requires `hadoop', see --hadoop)");
-
-    add(&overwrite,
-        "overwrite",
-        "Overwrite the package in HDFS if it already exists",
+    add(&revocable,
+        "revocable",
+        "Accept revocable resources",
         false);
-
-    add(&checkpoint,
-        "checkpoint",
-        "Enable checkpointing for the framework",
-        false);
-
-    add(&docker_image,
-        "docker_image",
-        "Docker image that follows the Docker CLI naming <image>:<tag>."
-        "(ie: ubuntu, busybox:latest).");
-
-    add(&containerizer,
-        "containerizer",
-        "Containerizer to be used (ie: docker, mesos)",
-        "mesos");
   }
 
   Option<string> master;
-  Option<string> name;
-  bool shell;
   Option<string> command;
-  Option<hashmap<string, string>> environment;
+  bool revocable;
   string resources;
-  string hadoop;
-  string hdfs;
-  Option<string> package;
-  bool overwrite;
-  bool checkpoint;
-  Option<string> docker_image;
-  string containerizer;
+  string name;
 };
 
 
@@ -145,23 +91,15 @@ class CommandScheduler : public Scheduler
 {
 public:
   CommandScheduler(
-      const string& _name,
-      const bool& _shell,
       const Option<string>& _command,
-      const Option<hashmap<string, string>>& _environment,
       const string& _resources,
-      const Option<string>& _uri,
-      const Option<string>& _dockerImage,
-      const string& _containerizer)
-    : name(_name),
-      shell(_shell),
-      command(_command),
-      environment(_environment),
+      bool _revocable)
+    : command(_command),
       resources(_resources),
-      uri(_uri),
-      dockerImage(_dockerImage),
-      containerizer(_containerizer),
-      launched(false) {}
+      revocable(_revocable)
+  {
+    taskIndex = 0;
+  }
 
   virtual ~CommandScheduler() {}
 
@@ -185,7 +123,7 @@ public:
       SchedulerDriver* driver,
       const vector<Offer>& offers)
   {
-    static const Try<Resources> TASK_RESOURCES = Resources::parse(resources);
+    static Try<Resources> TASK_RESOURCES = Resources::parse(resources);
 
     if (TASK_RESOURCES.isError()) {
       cerr << "Failed to parse resources '" << resources
@@ -194,73 +132,32 @@ public:
       return;
     }
 
+    if (revocable) {
+        TASK_RESOURCES = TASK_RESOURCES.get()
+            .flatten(Resource::RevocableInfo());
+    }
+
     foreach (const Offer& offer, offers) {
-      if (!launched &&
-          Resources(offer.resources()).contains(TASK_RESOURCES.get())) {
+      cout << "Received offer " << offer.id() << " from slave "
+           << offer.slave_id() << " (" << offer.hostname() << ") "
+           << "with " << offer.resources() << endl;
+
+      cout << "Task resources is : " << TASK_RESOURCES.get() << endl;
+
+      if (Resources(offer.resources()).contains(TASK_RESOURCES.get())) {
+        string name = string("Test_") + stringify(taskIndex++);
         TaskInfo task;
         task.set_name(name);
-        task.mutable_task_id()->set_value(name);
+        task.mutable_task_id()->set_value(stringify(taskIndex));
         task.mutable_slave_id()->MergeFrom(offer.slave_id());
         task.mutable_resources()->CopyFrom(TASK_RESOURCES.get());
 
         CommandInfo* commandInfo = task.mutable_command();
 
-        if (shell) {
-          CHECK_SOME(command);
+        CHECK_SOME(command);
 
-          commandInfo->set_shell(true);
-          commandInfo->set_value(command.get());
-        } else {
-          // TODO(gilbert): Treat 'command' as executable value and arguments.
-          commandInfo->set_shell(false);
-        }
-
-        if (environment.isSome()) {
-          Environment* environment_ = commandInfo->mutable_environment();
-          foreachpair (
-              const string& name, const string& value, environment.get()) {
-            Environment_Variable* environmentVariable =
-              environment_->add_variables();
-            environmentVariable->set_name(name);
-            environmentVariable->set_value(value);
-          }
-        }
-
-        if (uri.isSome()) {
-          task.mutable_command()->add_uris()->set_value(uri.get());
-        }
-
-        if (dockerImage.isSome()) {
-          ContainerInfo containerInfo;
-
-          if (containerizer == "mesos") {
-            containerInfo.set_type(ContainerInfo::MESOS);
-
-            ContainerInfo::MesosInfo mesosInfo;
-
-            Image mesosImage;
-            mesosImage.set_type(Image::DOCKER);
-            mesosImage.mutable_docker()->set_name(dockerImage.get());
-            mesosInfo.mutable_image()->CopyFrom(mesosImage);
-
-            containerInfo.mutable_mesos()->CopyFrom(mesosInfo);
-          } else if (containerizer == "docker") {
-            containerInfo.set_type(ContainerInfo::DOCKER);
-
-            ContainerInfo::DockerInfo dockerInfo;
-            dockerInfo.set_image(dockerImage.get());
-
-            containerInfo.mutable_docker()->CopyFrom(dockerInfo);
-          } else {
-            cerr << "Unsupported containerizer: " << containerizer << endl;;
-
-            driver->abort();
-
-            return;
-          }
-
-          task.mutable_container()->CopyFrom(containerInfo);
-        }
+        commandInfo->set_shell(true);
+        commandInfo->set_value(command.get());
 
         vector<TaskInfo> tasks;
         tasks.push_back(task);
@@ -268,8 +165,6 @@ public:
         driver->launchTasks(offer.id(), tasks);
         cout << "task " << name << " submitted to slave "
              << offer.slave_id() << endl;
-
-        launched = true;
       } else {
         driver->declineOffer(offer.id());
       }
@@ -284,7 +179,6 @@ public:
       SchedulerDriver* driver,
       const TaskStatus& status)
   {
-    CHECK_EQ(name, status.task_id().value());
     cout << "Received status update " << status.state()
          << " for task " << status.task_id() << endl;
     if (mesos::internal::protobuf::isTerminalState(status.state())) {
@@ -313,15 +207,10 @@ public:
       const string& message) {}
 
 private:
-  const string name;
-  bool shell;
+  int taskIndex;
   const Option<string> command;
-  const Option<hashmap<string, string>> environment;
   const string resources;
-  const Option<string> uri;
-  const Option<string> dockerImage;
-  const string containerizer;
-  bool launched;
+  bool revocable;
 };
 
 
@@ -358,12 +247,7 @@ int main(int argc, char** argv)
     return EXIT_FAILURE;
   }
 
-  if (flags.name.isNone()) {
-    cerr << flags.usage("Missing required option --name") << endl;
-    return EXIT_FAILURE;
-  }
-
-  if (flags.shell && flags.command.isNone()) {
+  if (flags.command.isNone()) {
     cerr << flags.usage("Missing required option --command") << endl;
     return EXIT_FAILURE;
   }
@@ -378,88 +262,20 @@ int main(int argc, char** argv)
     return EXIT_FAILURE;
   }
 
-  Option<hashmap<string, string>> environment = None();
-
-  if (flags.environment.isSome()) {
-    environment = flags.environment.get();
-  }
-
-  // Copy the package to HDFS if requested save it's location as a URI
-  // for passing to the command (in CommandInfo).
-  Option<string> uri = None();
-
-  if (flags.package.isSome()) {
-    Try<Owned<HDFS>> hdfs = HDFS::create(flags.hadoop);
-    if (hdfs.isError()) {
-      cerr << "Failed to create HDFS client: " << hdfs.error() << endl;
-      return EXIT_FAILURE;
-    }
-
-    // TODO(benh): If HDFS is not properly configured with
-    // 'fs.default.name' then we'll copy to the local
-    // filesystem. Currently this will silently fail on our end (i.e.,
-    // the 'copyFromLocal' will be successful) but we'll fail to
-    // download the URI when we launch the executor (unless it's
-    // already been uploaded before ...).
-
-    // Store the file at '/user/package'.
-    string path = path::join("/", user.get(), flags.package.get());
-
-    // Check if the file exists and remove it if we're overwriting.
-    Future<bool> exists = hdfs.get()->exists(path);
-    exists.await();
-
-    if (!exists.isReady()) {
-      cerr << "Failed to check if file exists: "
-           << (exists.isFailed() ? exists.failure() : "discarded") << endl;
-      return EXIT_FAILURE;
-    } else if (exists.get() && flags.overwrite) {
-      Future<Nothing> rm = hdfs.get()->rm(path);
-      rm.await();
-
-      if (!rm.isReady()) {
-        cerr << "Failed to remove existing file: "
-             << (rm.isFailed() ? rm.failure() : "discarded") << endl;
-        return EXIT_FAILURE;
-      }
-    } else if (exists.get()) {
-      cerr << "File already exists (see --overwrite)" << endl;
-      return EXIT_FAILURE;
-    }
-
-    Future<Nothing> copy = hdfs.get()->copyFromLocal(flags.package.get(), path);
-    copy.await();
-
-    if (!copy.isReady()) {
-      cerr << "Failed to copy package: "
-           << (copy.isFailed() ? copy.failure() : "discarded") << endl;
-      return EXIT_FAILURE;
-    }
-
-    // Now save the URI.
-    uri = "hdfs://" + flags.hdfs + path;
-  }
-
-  Option<string> dockerImage;
-
-  if (flags.docker_image.isSome()) {
-    dockerImage = flags.docker_image.get();
-  }
-
   CommandScheduler scheduler(
-      flags.name.get(),
-      flags.shell,
       flags.command,
-      environment,
       flags.resources,
-      uri,
-      dockerImage,
-      flags.containerizer);
+      flags.revocable);
 
   FrameworkInfo framework;
   framework.set_user(user.get());
-  framework.set_name("");
-  framework.set_checkpoint(flags.checkpoint);
+  framework.set_name(flags.name);
+  framework.set_checkpoint(true);
+
+  if (flags.revocable) {
+    framework.add_capabilities()->set_type(
+        FrameworkInfo::Capability::REVOCABLE_RESOURCES);
+  }
 
   MesosSchedulerDriver driver(&scheduler, framework, flags.master.get());
 
