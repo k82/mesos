@@ -5056,7 +5056,8 @@ void Slave::_forwardOversubscribed(const Future<Resources>& oversubscribable)
       message.mutable_oversubscribed_resources()->CopyFrom(oversubscribed);
 
       CHECK_SOME(master);
-      send(master.get(), message);
+      // TODO(klaus1982): ignore revocable for now.
+      // send(master.get(), message);
     }
 
     // Update the estimate.

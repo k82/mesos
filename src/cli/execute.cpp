@@ -73,6 +73,10 @@ public:
         "The name of framework",
         "test");
 
+    add(&role,
+        "role",
+        "The role of framework");
+
     add(&revocable,
         "revocable",
         "Accept revocable resources",
@@ -84,6 +88,7 @@ public:
   bool revocable;
   string resources;
   string name;
+  Option<string> role;
 };
 
 
@@ -142,8 +147,6 @@ public:
            << offer.slave_id() << " (" << offer.hostname() << ") "
            << "with " << offer.resources() << endl;
 
-      cout << "Task resources is : " << TASK_RESOURCES.get() << endl;
-
       if (Resources(offer.resources()).contains(TASK_RESOURCES.get())) {
         string name = string("Test_") + stringify(taskIndex++);
         TaskInfo task;
@@ -181,9 +184,6 @@ public:
   {
     cout << "Received status update " << status.state()
          << " for task " << status.task_id() << endl;
-    if (mesos::internal::protobuf::isTerminalState(status.state())) {
-      driver->stop();
-    }
   }
 
   virtual void frameworkMessage(
@@ -270,6 +270,9 @@ int main(int argc, char** argv)
   FrameworkInfo framework;
   framework.set_user(user.get());
   framework.set_name(flags.name);
+  if (flags.role.isSome()) {
+    framework.set_role(flags.role.get());
+  }
   framework.set_checkpoint(true);
 
   if (flags.revocable) {
