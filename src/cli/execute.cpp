@@ -96,10 +96,12 @@ class CommandScheduler : public Scheduler
 {
 public:
   CommandScheduler(
+      const string& _frameworkName,
       const Option<string>& _command,
       const string& _resources,
       bool _revocable)
-    : command(_command),
+    : frameworkName(_frameworkName),
+      command(_command),
       resources(_resources),
       revocable(_revocable)
   {
@@ -148,7 +150,7 @@ public:
            << "with " << offer.resources() << endl;
 
       if (Resources(offer.resources()).contains(TASK_RESOURCES.get())) {
-        string name = string("Test_") + stringify(taskIndex++);
+        string name = frameworkName + "-" + stringify(taskIndex++);
         TaskInfo task;
         task.set_name(name);
         task.mutable_task_id()->set_value(stringify(taskIndex));
@@ -208,6 +210,7 @@ public:
 
 private:
   int taskIndex;
+  string frameworkName;
   const Option<string> command;
   const string resources;
   bool revocable;
@@ -263,6 +266,7 @@ int main(int argc, char** argv)
   }
 
   CommandScheduler scheduler(
+      flags.name,
       flags.command,
       flags.resources,
       flags.revocable);
