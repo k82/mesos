@@ -259,8 +259,6 @@ public:
   // Returns the resources can be `ALLOCATION_SLACK`.
   Resources allocationSlackable() const;
 
-  Resources flattenSlack() const;
-
   // Returns a Resources object with the same amount of each resource
   // type as these Resources, but with all Resource objects marked as
   // the specified (role, reservation) pair. This is used to cross

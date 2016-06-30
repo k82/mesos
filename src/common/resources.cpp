@@ -972,6 +972,8 @@ Resources Resources::flatten(const Resource::RevocableInfo& revocable) const
   Resources flattened;
 
   foreach (Resource resource, resources) {
+    resource.set_role("*");
+    resource.clear_reservation();
     resource.mutable_revocable()->CopyFrom(revocable);
     flattened += resource;
   }
