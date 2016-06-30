@@ -4174,6 +4174,13 @@ Result<list<Executor*>> Slave::getEvictableExecutors(
 
   Resources allocationSlack = requested.allocationSlack();
 
+  LOG(INFO) << "total: <" << total
+            << ">, pending: <" << pending
+            << ">, occupied: <" << occupied
+            << ">, evicting: <" << evicting
+            << ">, available: <" << available
+            << ">, idle: <" << idle << ">";
+
   if (!allocationSlack.empty()) {
     LOG(INFO) << "Got idle resources <" << idle
               << "> for <" << allocationSlack << ">";
