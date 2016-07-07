@@ -4077,7 +4077,9 @@ Resources Slave::getPendingAllocationSlack()
 
     // Account pending executors resources.
     foreachvalue (const ExecutorInfo& executor, framework->pendingExecutors) {
-      pending += executor.resources();
+        if (!strings::contains(executor.command().value(), "mesos-executor")) {
+            pending += executor.resources();
+        }
     }
   }
 
@@ -4104,7 +4106,9 @@ Resources Slave::getOccupiedAllocationSlack()
 
   foreachvalue (Framework* framework, frameworks) {
     foreachvalue (Executor* executor, framework->executors) {
-      occupied += executor->resources;
+        if (!executor->isCommandExecutor()) {
+            occupied += executor->resources;
+        }
 
       // Includes queued tasks which will use resources.
       foreach (const TaskInfo& task, executor->queuedTasks.values()) {
