@@ -15,6 +15,7 @@
 // limitations under the License.
 
 #include <algorithm>
+#include <iostream>
 #include <set>
 #include <sstream>
 #include <string>
@@ -32,6 +33,8 @@
 
 using namespace mesos::internal::master;
 
+using std::cout;
+using std::endl;
 using std::map;
 using std::ostringstream;
 using std::pair;
@@ -2404,6 +2407,214 @@ TEST(RevocableResourceTest, Filter)
   EXPECT_EQ(r1, (r1 + r2).revocable());
   EXPECT_EQ(r2, (r1 + r2).nonRevocable());
 }
+
+
+struct ResourcesTestCase {
+  string description;
+  vector<Resources> resources;
+};
+
+
+typedef void (*ResourcesOperatorPtr1)(Resources&);
+typedef void (*ResourcesOperatorPtr2)(Resources&, Resources&);
+
+
+struct ResourcesOperator {
+  string description;
+  ResourcesOperatorPtr1 op1;
+  ResourcesOperatorPtr2 op2;
+};
+
+
+class Resources_BENCHMARK_Test
+  : public ::testing::Test,
+    public ::testing::WithParamInterface<
+        std::tr1::tuple<ResourcesTestCase, ResourcesOperator, size_t>> {};
+
+
+class Resources_BENCHMARK_TestCases {
+public:
+  static vector<ResourcesTestCase>& test_cases() {
+    if (testCases_.isNone()) {
+      testCases_ = getTestCases();
+    }
+
+    return testCases_.get();
+  }
+
+
+  static vector<ResourcesOperator>& ops() {
+    if (ops_.isNone()) {
+      ops_ = getOps();
+    }
+
+    return ops_.get();
+  }
+
+
+private:
+  static vector<ResourcesTestCase> getTestCases() {
+    vector<ResourcesTestCase> testCases;
+    testCases.push_back(testOneCPU());
+    testCases.push_back(testOneCPUTwoMem());
+    testCases.push_back(testOneCPU100Roles());
+    testCases.push_back(testOneCPU10Mem100Roles());
+
+    return testCases;
+  }
+
+
+  static vector<ResourcesOperator> getOps() {
+    vector<ResourcesOperator> ops;
+    ResourcesOperator op;
+
+    // Resources::operator+=
+    op.description = "AddAndAssign";
+    op.op1 = nullptr;
+    op.op2 = [](Resources& l, Resources& r) {
+        l += r;
+    };
+    ops.push_back(op);
+
+    // Resources::operator+
+    op.description = "Add";
+    op.op1 = nullptr;
+    op.op2 = [](Resources& l, Resources& r) {
+        l + r;
+    };
+    ops.push_back(op);
+
+    // Resources::operator-
+    op.description = "Sub";
+    op.op1 = nullptr;
+    op.op2 = [](Resources& l, Resources& r) {
+        l - r;
+    };
+    ops.push_back(op);
+
+    // Resources::operator-=
+    op.description = "SubAndAssign";
+    op.op1 = nullptr;
+    op.op2 = [](Resources& l, Resources& r) {
+        l -= r;
+    };
+    ops.push_back(op);
+
+    // Resources::cpus()
+    op.description = "cpus";
+    op.op1 = [](Resources& res) {
+      res.cpus();
+    };
+    op.op2 = nullptr;
+    ops.push_back(op);
+
+    return ops;
+  }
+
+
+  static ResourcesTestCase testOneCPU() {
+    ResourcesTestCase testCase;
+    testCase.description = "cpus:1";
+    testCase.resources.push_back(Resources::parse("cpus:1").get());
+
+    return testCase;
+  }
+
+
+  static ResourcesTestCase testOneCPUTwoMem() {
+    ResourcesTestCase testCase;
+    testCase.description = "cpus:1;mem:2";
+    testCase.resources.push_back(Resources::parse("cpus:1;mem:2").get());
+
+    return testCase;
+  }
+
+
+  // TODO(klaus1982): Add more test cases, e.g. DiskInfo, ReservationInfo.
+  //
+  static ResourcesTestCase testOneCPU100Roles() {
+    ResourcesTestCase testCase;
+    testCase.description = "reserved 1 CPU for 100 roles each";
+    Resources resources;
+
+    for (int i = 0; i < 100; i++) {
+        resources +=
+            Resources::parse("cpus", "1", stringify("r") + stringify(i)).get();
+    }
+
+    testCase.resources.push_back(resources);
+
+    return testCase;
+  }
+
+
+  static ResourcesTestCase testOneCPU10Mem100Roles() {
+    ResourcesTestCase testCase;
+    testCase.description = "reserved 1 CPU and 100 Mem for 100 roles each";
+    Resources resources;
+
+    for (int i = 0; i < 100; i++) {
+        resources +=
+            Resources::parse("cpus", "1", stringify("r") + stringify(i)).get();
+        resources +=
+            Resources::parse("mem", "100", stringify("r") + stringify(i)).get();
+    }
+
+    testCase.resources.push_back(resources);
+
+    return testCase;
+  }
+
+
+private:
+  static Option<vector<ResourcesTestCase>> testCases_;
+  static Option<vector<ResourcesOperator>> ops_;
+};
+
+
+Option<vector<ResourcesTestCase>> Resources_BENCHMARK_TestCases::testCases_;
+Option<vector<ResourcesOperator>> Resources_BENCHMARK_TestCases::ops_;
+
+
+// The Resources benchmark tests are parameterized
+// by the number of operator.
+INSTANTIATE_TEST_CASE_P(
+    ResourcesOperators,
+    Resources_BENCHMARK_Test,
+    ::testing::Combine(
+      ::testing::ValuesIn(Resources_BENCHMARK_TestCases::test_cases().begin(),
+                          Resources_BENCHMARK_TestCases::test_cases().end()),
+      ::testing::ValuesIn(Resources_BENCHMARK_TestCases::ops().begin(),
+                          Resources_BENCHMARK_TestCases::ops().end()),
+      ::testing::Values(10000UL))
+    );
+
+
+TEST_P(Resources_BENCHMARK_Test, Operator)
+{
+  ResourcesTestCase testCase = std::tr1::get<0>(GetParam());
+  ResourcesOperator op = std::tr1::get<1>(GetParam());
+  size_t total = std::tr1::get<2>(GetParam());
+
+  Resources resources = Resources::parse("cpus:32;mem:1024").get();
+
+  Stopwatch watch;
+  watch.start();
+
+  for (size_t i = 0; i < total; i++) {
+    foreach (Resources& resources_, testCase.resources) {
+      if (op.op1) {
+        op.op1(resources_);
+      } else if (op.op2) {
+        op.op2(resources, resources_);
+      }
+    }
+  }
+
+  cout << "Took " << watch.elapsed() << " to `" << op.description << "` \""
+      << testCase.description << "\" " << total << " times." << endl;
+}
+
 
 } // namespace tests {
 } // namespace internal {
