@@ -2409,32 +2409,29 @@ TEST(RevocableResourceTest, Filter)
 }
 
 
-struct ResourcesTestCase {
+struct ResourcesTestCase
+{
   string description;
+  Resources initResources;
   vector<Resources> resources;
-};
 
-
-typedef void (*ResourcesOperatorPtr1)(Resources&);
-typedef void (*ResourcesOperatorPtr2)(Resources&, Resources&);
-
-
-struct ResourcesOperator {
-  string description;
-  ResourcesOperatorPtr1 op1;
-  ResourcesOperatorPtr2 op2;
+  ResourcesTestCase()
+  {
+    initResources = Resources::parse("cpus:32;mem:1024").get();
+  }
 };
 
 
 class Resources_BENCHMARK_Test
   : public ::testing::Test,
     public ::testing::WithParamInterface<
-        std::tr1::tuple<ResourcesTestCase, ResourcesOperator, size_t>> {};
+        std::tr1::tuple<ResourcesTestCase, size_t>> {};
 
 
-class Resources_BENCHMARK_TestCases {
+class Resources_BENCHMARK_TestCases
+{
 public:
-  static vector<ResourcesTestCase>& test_cases() {
+  static vector<ResourcesTestCase>& testCases() {
     if (testCases_.isNone()) {
       testCases_ = getTestCases();
     }
@@ -2443,72 +2440,17 @@ public:
   }
 
 
-  static vector<ResourcesOperator>& ops() {
-    if (ops_.isNone()) {
-      ops_ = getOps();
-    }
-
-    return ops_.get();
-  }
-
-
 private:
   static vector<ResourcesTestCase> getTestCases() {
     vector<ResourcesTestCase> testCases;
+
     testCases.push_back(testOneCPU());
     testCases.push_back(testOneCPUTwoMem());
     testCases.push_back(testOneCPU100Roles());
     testCases.push_back(testOneCPU10Mem100Roles());
+    testCases.push_back(test100Ports());
 
     return testCases;
-  }
-
-
-  static vector<ResourcesOperator> getOps() {
-    vector<ResourcesOperator> ops;
-    ResourcesOperator op;
-
-    // Resources::operator+=
-    op.description = "AddAndAssign";
-    op.op1 = nullptr;
-    op.op2 = [](Resources& l, Resources& r) {
-        l += r;
-    };
-    ops.push_back(op);
-
-    // Resources::operator+
-    op.description = "Add";
-    op.op1 = nullptr;
-    op.op2 = [](Resources& l, Resources& r) {
-        l + r;
-    };
-    ops.push_back(op);
-
-    // Resources::operator-
-    op.description = "Sub";
-    op.op1 = nullptr;
-    op.op2 = [](Resources& l, Resources& r) {
-        l - r;
-    };
-    ops.push_back(op);
-
-    // Resources::operator-=
-    op.description = "SubAndAssign";
-    op.op1 = nullptr;
-    op.op2 = [](Resources& l, Resources& r) {
-        l -= r;
-    };
-    ops.push_back(op);
-
-    // Resources::cpus()
-    op.description = "cpus";
-    op.op1 = [](Resources& res) {
-      res.cpus();
-    };
-    op.op2 = nullptr;
-    ops.push_back(op);
-
-    return ops;
   }
 
 
@@ -2530,8 +2472,6 @@ private:
   }
 
 
-  // TODO(klaus1982): Add more test cases, e.g. DiskInfo, ReservationInfo.
-  //
   static ResourcesTestCase testOneCPU100Roles() {
     ResourcesTestCase testCase;
     testCase.description = "reserved 1 CPU for 100 roles each";
@@ -2566,14 +2506,33 @@ private:
   }
 
 
+  static ResourcesTestCase test100Ports()
+  {
+    ResourcesTestCase testCase;
+    testCase.description = "[1-2, 3-4, ... , 199-200]";
+    Resources resources;
+
+    int port = 1;
+    for (int i = 0; i < 100; i++) {
+      char tmp[128] = {0};
+      sprintf(tmp, "ports:[%d-%d]", port, port+1);
+      resources += Resources::parse(tmp).get();
+      port += 2;
+    }
+
+    testCase.resources.push_back(resources);
+
+    return testCase;
+  }
+
+  // TODO(klaus1982): Add more test cases, e.g. DiskInfo, ReservationInfo.
+
 private:
   static Option<vector<ResourcesTestCase>> testCases_;
-  static Option<vector<ResourcesOperator>> ops_;
 };
 
 
 Option<vector<ResourcesTestCase>> Resources_BENCHMARK_TestCases::testCases_;
-Option<vector<ResourcesOperator>> Resources_BENCHMARK_TestCases::ops_;
 
 
 // The Resources benchmark tests are parameterized
@@ -2582,37 +2541,135 @@ INSTANTIATE_TEST_CASE_P(
     ResourcesOperators,
     Resources_BENCHMARK_Test,
     ::testing::Combine(
-      ::testing::ValuesIn(Resources_BENCHMARK_TestCases::test_cases().begin(),
-                          Resources_BENCHMARK_TestCases::test_cases().end()),
-      ::testing::ValuesIn(Resources_BENCHMARK_TestCases::ops().begin(),
-                          Resources_BENCHMARK_TestCases::ops().end()),
+      ::testing::ValuesIn(Resources_BENCHMARK_TestCases::testCases().begin(),
+                          Resources_BENCHMARK_TestCases::testCases().end()),
       ::testing::Values(10000UL))
     );
 
 
-TEST_P(Resources_BENCHMARK_Test, Operator)
+TEST_P(Resources_BENCHMARK_Test, Operator_AddAndAssign)
 {
   ResourcesTestCase testCase = std::tr1::get<0>(GetParam());
-  ResourcesOperator op = std::tr1::get<1>(GetParam());
-  size_t total = std::tr1::get<2>(GetParam());
+  size_t total = std::tr1::get<1>(GetParam());
 
-  Resources resources = Resources::parse("cpus:32;mem:1024").get();
+  Resources resources = testCase.initResources;
 
   Stopwatch watch;
   watch.start();
 
   for (size_t i = 0; i < total; i++) {
     foreach (Resources& resources_, testCase.resources) {
-      if (op.op1) {
-        op.op1(resources_);
-      } else if (op.op2) {
-        op.op2(resources, resources_);
-      }
+      resources += resources_;
     }
   }
 
-  cout << "Took " << watch.elapsed() << " to `" << op.description << "` \""
-      << testCase.description << "\" " << total << " times." << endl;
+  cout << "Took " << watch.elapsed() << " to AddAndAssign \""
+       << testCase.description << "\" " << total << " times." << endl;
+}
+
+
+TEST_P(Resources_BENCHMARK_Test, Operator_Add)
+{
+  ResourcesTestCase testCase = std::tr1::get<0>(GetParam());
+  size_t total = std::tr1::get<1>(GetParam());
+
+  Resources resources = testCase.initResources;
+
+  Stopwatch watch;
+  watch.start();
+
+  for (size_t i = 0; i < total; i++) {
+    foreach (Resources& resources_, testCase.resources) {
+      resources + resources_;
+    }
+  }
+
+  cout << "Took " << watch.elapsed() << " to Add \""
+       << testCase.description << "\" " << total << " times." << endl;
+}
+
+
+TEST_P(Resources_BENCHMARK_Test, Operator_Sub)
+{
+  ResourcesTestCase testCase = std::tr1::get<0>(GetParam());
+  size_t total = std::tr1::get<1>(GetParam());
+
+  Resources resources = testCase.initResources;
+
+  Stopwatch watch;
+  watch.start();
+
+  for (size_t i = 0; i < total; i++) {
+    foreach (Resources& resources_, testCase.resources) {
+      resources - resources_;
+    }
+  }
+
+  cout << "Took " << watch.elapsed() << " to Sub \""
+       << testCase.description << "\" " << total << " times." << endl;
+}
+
+
+TEST_P(Resources_BENCHMARK_Test, Operator_SubAndAssign)
+{
+  ResourcesTestCase testCase = std::tr1::get<0>(GetParam());
+  size_t total = std::tr1::get<1>(GetParam());
+
+  Resources resources = testCase.initResources;
+
+  Stopwatch watch;
+  watch.start();
+
+  for (size_t i = 0; i < total; i++) {
+    foreach (Resources& resources_, testCase.resources) {
+      resources -= resources_;
+    }
+  }
+
+  cout << "Took " << watch.elapsed() << " to SubAndAssign \""
+       << testCase.description << "\" " << total << " times." << endl;
+}
+
+
+TEST_P(Resources_BENCHMARK_Test, Operator_CPUS)
+{
+  ResourcesTestCase testCase = std::tr1::get<0>(GetParam());
+  size_t total = std::tr1::get<1>(GetParam());
+
+  Resources resources = testCase.initResources;
+
+  Stopwatch watch;
+  watch.start();
+
+  for (size_t i = 0; i < total; i++) {
+    foreach (Resources& resources_, testCase.resources) {
+      resources_.cpus();
+    }
+  }
+
+  cout << "Took " << watch.elapsed() << " to `cpus()` \""
+       << testCase.description << "\" " << total << " times." << endl;
+}
+
+
+TEST_P(Resources_BENCHMARK_Test, Operator_MEM)
+{
+  ResourcesTestCase testCase = std::tr1::get<0>(GetParam());
+  size_t total = std::tr1::get<1>(GetParam());
+
+  Resources resources = testCase.initResources;
+
+  Stopwatch watch;
+  watch.start();
+
+  for (size_t i = 0; i < total; i++) {
+    foreach (Resources& resources_, testCase.resources) {
+      resources_.mem();
+    }
+  }
+
+  cout << "Took " << watch.elapsed() << " to `mem()` \""
+       << testCase.description << "\" " << total << " times." << endl;
 }
 
 
