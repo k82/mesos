@@ -978,7 +978,7 @@ void HierarchicalAllocatorProcess::recoverResources(
     //
     // TODO(alexr): If we allocated upon resource recovery
     // (MESOS-3078), we would not need to increase the timeout here.
-    timeout = std::max(allocationInterval, timeout.get());
+    // timeout = std::max(allocationInterval, timeout.get());
 
     delay(timeout.get(),
           self(),
